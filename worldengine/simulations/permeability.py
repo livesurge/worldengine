@@ -1,5 +1,6 @@
 from worldengine.simulations.basic import find_threshold_f
-import random
+from noise import snoise2
+import numpy
 
 
 class PermeabilitySimulation(object):
@@ -19,20 +20,18 @@ class PermeabilitySimulation(object):
 
     @staticmethod
     def _calculate(seed, width, height):
-        random.seed(seed * 37)
-        base = random.randint(0, 4096)
-        perm = [[0 for x in range(width)] for y in range(height)]  # TODO: replace with numpy
+        rng = numpy.random.RandomState(seed)  # create our own random generator
+        base = rng.randint(0, 4096)
 
-        from noise import snoise2
+        perm = numpy.zeros((height, width), dtype=float)
 
         octaves = 6
         freq = 64.0 * octaves
 
-        for y in range(0, height):
+        for y in range(0, height):#TODO: numpy optimization?
             # yscaled = float(y) / height  # TODO: what is this?
             for x in range(0, width):
                 n = snoise2(x / freq, y / freq, octaves, base=base)
-                t = n
-                perm[y][x] = t
+                perm[y, x] = n
 
         return perm

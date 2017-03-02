@@ -1,18 +1,23 @@
 import sys
 from argparse import ArgumentParser
 import os
-import pickle
-import random
+import numpy
 import worldengine.generation as geo
-from worldengine.common import array_to_matrix, set_verbose, print_verbose
+from worldengine.common import set_verbose, print_verbose
 from worldengine.draw import draw_ancientmap_on_file, draw_biome_on_file, draw_ocean_on_file, \
     draw_precipitation_on_file, draw_grayscale_heightmap_on_file, draw_simple_elevation_on_file, \
-    draw_temperature_levels_on_file, draw_riversmap_on_file
+    draw_temperature_levels_on_file, draw_riversmap_on_file, draw_scatter_plot_on_file, \
+    draw_satellite_on_file, draw_icecaps_on_file
 from worldengine.plates import world_gen, generate_plates_simulation
 from worldengine.imex import export
 from worldengine.step import Step
 from worldengine.world import World
 from worldengine.version import __version__
+try:
+    from worldengine.hdf5_serialization import save_world_to_hdf5
+    HDF5_AVAILABLE = True
+except:
+    HDF5_AVAILABLE = False
 
 VERSION = __version__
 
@@ -22,9 +27,12 @@ STEPS = 'plates|precipitations|full'
 
 
 def generate_world(world_name, width, height, seed, num_plates, output_dir,
-                   step, ocean_level, world_format='pickle', verbose=True, black_and_white=False):
-    w = world_gen(world_name, width, height, seed, num_plates, ocean_level,
-                  step, verbose=verbose)
+                   step, ocean_level, temps, humids, world_format='protobuf',
+                   gamma_curve=1.25, curve_offset=.2, fade_borders=True,
+                   verbose=True, black_and_white=False):
+    w = world_gen(world_name, width, height, seed, temps, humids, num_plates, ocean_level,
+                  step, gamma_curve=gamma_curve, curve_offset=curve_offset,
+                  fade_borders=fade_borders, verbose=verbose)
 
     print('')  # empty line
     print('Producing ouput:')
@@ -32,13 +40,13 @@ def generate_world(world_name, width, height, seed, num_plates, output_dir,
 
     # Save data
     filename = "%s/%s.world" % (output_dir, world_name)
-    with open(filename, "wb") as f:
-        if world_format == 'pickle':
-            pickle.dump(w, f, pickle.HIGHEST_PROTOCOL)
-        elif world_format == 'protobuf':
+    if world_format == 'protobuf':
+        with open(filename, "wb") as f:
             f.write(w.protobuf_serialize())
-        else:
-            print("Unknown format '%s', not saving " % world_format)
+    elif world_format == 'hdf5':
+        save_world_to_hdf5(w, filename)
+    else:
+        print("Unknown format '%s', not saving " % world_format)
     print("* world data saved in '%s'" % filename)
     sys.stdout.flush()
 
@@ -62,8 +70,7 @@ def generate_world(world_name, width, height, seed, num_plates, output_dir,
 
     filename = '%s/%s_elevation.png' % (output_dir, world_name)
     sea_level = w.sea_level()
-    draw_simple_elevation_on_file(w.elevation['data'], filename, width=width,
-                                  height=height, sea_level=sea_level)
+    draw_simple_elevation_on_file(w, filename, sea_level=sea_level)
     print("* elevation image generated in '%s'" % filename)
     return w
 
@@ -77,6 +84,17 @@ def generate_rivers_map(world, filename):
     draw_riversmap_on_file(world, filename)
     print("+ rivers map generated in '%s'" % filename)
 
+def draw_scatter_plot(world, filename):
+    draw_scatter_plot_on_file(world, filename)
+    print("+ scatter plot generated in '%s'" % filename)
+
+def draw_satellite_map(world, filename):
+    draw_satellite_on_file(world, filename)
+    print("+ satellite map generated in '%s'" % filename)
+
+def draw_icecaps_map(world, filename):
+    draw_icecaps_on_file(world, filename)
+    print("+ icecap map generated in '%s'" % filename)
 
 def generate_plates(seed, world_name, output_dir, width, height,
                     num_plates=10):
@@ -95,20 +113,16 @@ def generate_plates(seed, world_name, output_dir, width, height,
                                                    num_plates=num_plates)
 
     world = World(world_name, width, height, seed, num_plates, -1.0, "plates")
-    world.set_elevation(array_to_matrix(elevation, width, height), None)
-    world.set_plates(array_to_matrix(plates, width, height))
+    world.set_elevation(numpy.array(elevation).reshape(height, width), None)
+    world.set_plates(numpy.array(plates, dtype=numpy.uint16).reshape(height, width))
 
     # Generate images
     filename = '%s/plates_%s.png' % (output_dir, world_name)
-    # TODO calculate appropriate sea_level
-    sea_level = 1.0
-    draw_simple_elevation_on_file(world.elevation['data'], filename, width,
-                                  height, sea_level)
+    draw_simple_elevation_on_file(world, filename, None)
     print("+ plates image generated in '%s'" % filename)
     geo.center_land(world)
     filename = '%s/centered_plates_%s.png' % (output_dir, world_name)
-    draw_simple_elevation_on_file(world.elevation['data'], filename, width,
-                                  height, sea_level)
+    draw_simple_elevation_on_file(world, filename, None)
     print("+ centered plates image generated in '%s'" % filename)
 
 
@@ -181,32 +195,15 @@ def __seems_protobuf_worldfile__(world_filename):
     return worldengine_tag == World.worldengine_tag()
 
 
-def __seems_pickle_file__(world_filename):
-    last_byte = __get_last_byte__(world_filename)
-    return last_byte == ord('.')
-
-
 def load_world(world_filename):
     pb = __seems_protobuf_worldfile__(world_filename)
-    pi = __seems_pickle_file__(world_filename)
-    if pb and pi:
-        print("we cannot distinguish if the file is a pickle or a protobuf "
-              "world file. Trying to load first as protobuf then as pickle "
-              "file")
+    if pb:
         try:
             return World.open_protobuf(world_filename)
         except Exception:
-            try:
-                return World.from_pickle_file(world_filename)
-            except Exception:
-                raise Exception("Unable to load the worldfile neither as protobuf or pickle file")
-
-    elif pb:
-        return World.open_protobuf(world_filename)
-    elif pi:
-        return World.from_pickle_file(world_filename)
+            raise Exception("Unable to load the worldfile as protobuf file")
     else:
-        raise Exception("The given worldfile does not seem a pickle or a protobuf file")
+        raise Exception("The given worldfile does not seem to be a protobuf file")
 
 
 def print_world_info(world):
@@ -243,11 +240,10 @@ def main():
              "a name is not provided, then seed_N.world, " +
              "where N=SEED",
         metavar="STR")
-    # TODO: add description of protocol buffer
-    parser.add_argument('-b', '--protocol-buffer', dest='protobuf',
+    parser.add_argument('--hdf5', dest='hdf5',
                         action="store_true",
-                        help="Save world file using protocol buffer format. " +
-                             "Default = store using pickle format",
+                        help="Save world file using HDF5 format. " +
+                             "Default = store using protobuf format",
                         default=False)
     parser.add_argument('-s', '--seed', dest='seed', type=int,
                         help="Use seed=N to initialize the pseudo-random " +
@@ -300,6 +296,33 @@ def main():
                             help='elevation cut off for sea level " +'
                                  '[default = %(default)s]',
                             metavar="N", default=1.0)
+    g_generate.add_argument('--temps', dest='temps', 
+                        help="Provide alternate ranges for temperatures. " +
+                             "If not provided, the default values will be used. \n" +
+                             "[default = .126/.235/.406/.561/.634/.876]",
+                            metavar="#/#/#/#/#/#")
+    g_generate.add_argument('--humidity', dest='humids', 
+                        help="Provide alternate ranges for humidities. " +
+                             "If not provided, the default values will be used. \n" +
+                            "[default = .059/.222/.493/.764/.927/.986/.998]",
+                            metavar="#/#/#/#/#/#/#")
+    g_generate.add_argument('-gv', '--gamma-value', dest='gv', type=float,
+                        help="N = Gamma value for temperature/precipitation " +
+                             "gamma correction curve. [default = %(default)s]",
+                        metavar="N", default='1.25')
+    g_generate.add_argument('-go', '--gamma-offset', dest='go', type=float,
+                        help="N = Adjustment value for temperature/precipitation " +
+                             "gamma correction curve. [default = %(default)s]",
+                        metavar="N", default='.2')
+    g_generate.add_argument('--not-fade-borders', dest='fade_borders', action="store_false",
+                               help="Not fade borders",
+                               default=True)
+    g_generate.add_argument('--scatter', dest='scatter_plot',
+                            action="store_true", help="generate scatter plot")
+    g_generate.add_argument('--sat', dest='satelite_map',
+                            action="store_true", help="generate satellite map")
+    g_generate.add_argument('--ice', dest='icecaps_map',
+                            action="store_true", help="generate ice caps map")
 
     # -----------------------------------------------------
     g_ancient_map = parser.add_argument_group(
@@ -340,18 +363,13 @@ def main():
     # -----------------------------------------------------
     export_options = parser.add_argument_group(
         "Export Options", "You can specify the formats you wish the generated output to be in. ")
-    export_options.add_argument("--export-type", dest="export_type",
-                                help="Export to a specific format such as: BMP or PNG",
-                                default="bmp")
-    export_options.add_argument("--export-bpp", dest="export_bpp", type=int,
-                                help="Bits per pixel: 8, 16 and 32",
-                                default=8)
-    export_options.add_argument("--export-signed", dest="export_signed", action="store_true",
-                                help="Used signed bits or not.",
-                                default=False)
-    export_options.add_argument("--normalize", dest="export_normalize", action="store_true",
-                                help="Normalize data to the min and max of your bpp choice.",
-                                default=False)
+    export_options.add_argument("--export-format", dest="export_format", type=str,
+                                help="Export to a specific format such as BMP or PNG. " +
+                                "See http://www.gdal.org/formats_list.html for possible formats.",
+                                default="PNG", metavar="STR")
+    export_options.add_argument("--export-datatype", dest="export_datatype", type=str,
+                                help="Type of stored data, e.g. uint16, int32, float32 etc.",
+                                default="uint16", metavar="STR")
 
     args = parser.parse_args()
 
@@ -370,7 +388,10 @@ def main():
     sys.setrecursionlimit(args.recursion_limit)
 
     if args.number_of_plates < 1 or args.number_of_plates > 100:
-        usage(error="Number of plates should be a in [1, 100]")
+        usage(error="Number of plates should be in [1, 100]")
+
+    if args.hdf5 and not HDF5_AVAILABLE:
+        usage(error="HDF5 requires the presence of native libraries")
 
     operation = "world"
     if args.OPERATOR is None:
@@ -388,11 +409,13 @@ def main():
         if not os.path.exists(args.FILE):
             usage("The specified world file does not exist")
 
+    maxseed = numpy.iinfo(numpy.uint16).max  # there is a hard limit somewhere so seeds outside the uint16 range are considered unsafe
     if args.seed is not None:
         seed = int(args.seed)
+        assert 0 <= seed <= maxseed, "Seed has to be in the range between 0 and %s, borders included." % maxseed
     else:
-        seed = random.randint(0, 65535)#RNG initialization is done automatically
-    random.seed(seed)
+        seed = numpy.random.randint(0, maxseed)  # first-time RNG initialization is done automatically
+    numpy.random.seed(seed)
 
     if args.world_name:
         world_name = args.world_name
@@ -401,9 +424,9 @@ def main():
 
     step = check_step(args.step)
 
-    world_format = 'pickle'
-    if args.protobuf:
-        world_format = 'protobuf'
+    world_format = 'protobuf'
+    if args.hdf5:
+        world_format = 'hdf5'
 
     generation_operation = (operation == 'world') or (operation == 'plates')
 
@@ -415,10 +438,42 @@ def main():
     if args.rivers_map and not generation_operation:
         usage(error="Rivers map can be produced only during world generation")
 
+    if args.temps and not generation_operation:
+        usage(error="temps can be assigned only during world generation")
+
+    if args.temps and len(args.temps.split('/')) is not 6:
+        usage(error="temps must have exactly 6 values")
+
+    if args.go >= 1 or args.go < 0:
+        usage(error="Gamma offset must be greater than or equal to 0 and less than 1")
+
+    if args.gv <= 0:
+        usage(error="Gamma value must be greater than 0")
+
+    temps = [.874, .765, .594, .439, .366, .124]
+    if args.temps:
+        temps = args.temps.split('/')
+        for x in range(0,len(temps)):
+            temps[x] = 1 - float(temps[x])
+
+    if args.humids and not generation_operation:
+        usage(error="humidity can be assigned only during world generation")
+
+    if args.humids and len(args.humids.split('/')) is not 7:
+        usage(error="humidity must have exactly 7 values")
+
+    humids = [.941, .778, .507, .236, 0.073, .014, .002]
+    if args.humids:
+        humids = args.humids.split('/')
+        for x in range(0,len(humids)):
+            humids[x] = 1 - float(humids[x])
+    if args.scatter_plot and not generation_operation:
+        usage(error="Scatter plot can be produced only during world generation")
+
     print('Worldengine - a world generator (v. %s)' % VERSION)
     print('-----------------------')
-    print(' operation         : %s generation' % operation)
     if generation_operation:
+        print(' operation            : %s generation' % operation)
         print(' seed                 : %i' % seed)
         print(' name                 : %s' % world_name)
         print(' width                : %i' % args.width)
@@ -428,8 +483,19 @@ def main():
         print(' black and white maps : %s' % args.black_and_white)
         print(' step                 : %s' % step.name)
         print(' greyscale heightmap  : %s' % args.grayscale_heightmap)
+        print(' icecaps heightmap    : %s' % args.icecaps_map)
         print(' rivers map           : %s' % args.rivers_map)
+        print(' scatter plot         : %s' % args.scatter_plot)
+        print(' satellite map        : %s' % args.satelite_map)
+        print(' fade borders         : %s' % args.fade_borders)
+        if args.temps:
+            print(' temperature ranges   : %s' % args.temps)
+        if args.humids:
+            print(' humidity ranges      : %s' % args.humids)
+        print(' gamma value          : %s' % args.gv)
+        print(' gamma offset         : %s' % args.go)
     if operation == 'ancient_map':
+        print(' operation              : %s generation' % operation)
         print(' resize factor          : %i' % args.resize_factor)
         print(' world file             : %s' % args.world_file)
         print(' sea color              : %s' % args.sea_color)
@@ -437,6 +503,26 @@ def main():
         print(' draw rivers            : %s' % args.draw_rivers)
         print(' draw mountains         : %s' % args.draw_mountains)
         print(' draw land outer border : %s' % args.draw_outer_border)
+        
+    #Warning messages
+    warnings = []
+    if temps != sorted(temps, reverse=True):
+        warnings.append("WARNING: Temperature array not in ascending order")
+    if numpy.amin(temps) < 0:
+        warnings.append("WARNING: Maximum value in temperature array greater than 1")
+    if numpy.amax(temps) > 1:
+        warnings.append("WARNING: Minimum value in temperature array less than 0")
+    if humids != sorted(humids, reverse=True):
+        warnings.append("WARNING: Humidity array not in ascending order")
+    if numpy.amin(humids) < 0:
+        warnings.append("WARNING: Maximum value in humidity array greater than 1")
+    if numpy.amax(humids) > 1:
+        warnings.append("WARNING: Minimum value in temperature array less than 0")
+
+    if warnings:
+        print("\n")
+        for x in range(len(warnings)):
+            print(warnings[x])
 
     set_verbose(args.verbose)
 
@@ -446,14 +532,25 @@ def main():
 
         world = generate_world(world_name, args.width, args.height,
                                seed, args.number_of_plates, args.output_dir,
-                               step, args.ocean_level, world_format,
-                               args.verbose, black_and_white=args.black_and_white)
+                               step, args.ocean_level, temps, humids, world_format,
+                               gamma_curve=args.gv,curve_offset=args.go,
+                               fade_borders=args.fade_borders,
+                               verbose=args.verbose, black_and_white=args.black_and_white)
         if args.grayscale_heightmap:
             generate_grayscale_heightmap(world,
             '%s/%s_grayscale.png' % (args.output_dir, world_name))
         if args.rivers_map:
             generate_rivers_map(world,
             '%s/%s_rivers.png' % (args.output_dir, world_name))
+        if args.scatter_plot:
+            draw_scatter_plot(world,
+            '%s/%s_scatter.png' % (args.output_dir, world_name))    
+        if args.satelite_map:
+            draw_satellite_map(world,
+            '%s/%s_satellite.png' % (args.output_dir, world_name))
+        if args.icecaps_map:
+            draw_icecaps_map(world,
+            '%s/%s_icecaps.png' % (args.output_dir, world_name))
 
     elif operation == 'plates':
         print('')  # empty line
@@ -493,7 +590,8 @@ def main():
     elif operation == 'export':
         world = load_world(args.FILE)
         print_world_info(world)
-        export(world, args.export_type, args.export_bpp, args.export_signed, args.export_normalize)
+        export(world, args.export_format, args.export_datatype,
+               path = '%s/%s_elevation' % (args.output_dir, world_name))
     else:
         raise Exception(
             'Unknown operation: valid operations are %s' % OPERATIONS)
